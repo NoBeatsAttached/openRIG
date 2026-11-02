@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OpenRig</title>
+<meta name="description" content="OpenRig — free, open-source stage design and previs in the browser. Truss, decks, moving lights, LED walls, PA, with DMX patch, power and rigging paperwork.">
+<meta name="theme-color" content="#0a0c10">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0c10'/%3E%3Cpath d='M6 9h20M6 9l4 14M26 9l-4 14' stroke='%23ffb547' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="css/app.css">
+<script type="importmap">{"imports":{"three":"./vendor/three/three.module.min.js","three/addons/":"./vendor/three/addons/"}}</script>
+</head>
+<body>
+<!--APP-->
+<div id="app">
+  <header id="bar">
+    <div class="brand" aria-label="OpenRig">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M5 8h22M5 8l4.5 16M27 8l-4.5 16M9.5 24h13"/></svg></span>
+      <b>OPENRIG</b>
+    </div>
+    <input id="projName" type="text" aria-label="Project name" value="Main Stage" spellcheck="false">
+    <nav class="views" id="views" aria-label="Camera view">
+      <button data-v="3d" class="on">3D</button><button data-v="plot">Plan</button><button data-v="front">Front</button><button data-v="pov">Crowd POV</button>
+    </nav>
+    <div class="bar-r">
+      <label class="selectwrap"><span class="sr">Templates</span>
+        <select id="tpl"><option value="">Templates</option><option value="festival">Festival main stage</option><option value="club">Club stage</option><option value="blank">Blank stage</option></select>
+      </label>
+      <button class="btn" id="helpBtn" title="How to use OpenRig">Help</button>
+      <button class="btn" id="fileBtn">Save &amp; load</button>
+    </div>
+  </header>
+
+  <div id="stage">
+    <canvas id="c" aria-label="3D stage view"></canvas>
+
+    <aside id="lib" class="panel" aria-label="Gear library">
+      <div class="phead"><h2>Library</h2><span class="count" id="libCount"></span></div>
+      <p class="lsub">Drag gear onto the stage, or click it then click where it goes.</p>
+      <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><input id="libSearch" type="search" placeholder="Search gear" aria-label="Search gear"></div>
+      <div class="lscroll" id="libList"></div>
+    </aside>
+
+
+    <div id="dock" class="panel" role="toolbar" aria-label="Tools">
+      <div class="grp">
+        <button class="ib" id="undoBtn" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg><span>Undo</span></button>
+        <button class="ib" id="redoBtn" title="Redo (Ctrl+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg><span>Redo</span></button>
+        <label class="snap" title="Grid snap"><span class="sl">Snap</span><select id="snap" aria-label="Grid snap"><option value="0.25">3″</option><option value="0.5" selected>6″</option><option value="1">1′</option><option value="0">Off</option></select></label>
+        <button class="ib" id="frameBtn" title="Reset camera (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><circle cx="12" cy="12" r="2.5"/></svg><span>Reset view</span></button>
+      </div>
+      <div class="grp">
+        <button class="ib play" id="playBtn" title="Play / pause the light show (Space)"><svg viewBox="0 0 24 24" class="i-pause"><path d="M9 5v14M15 5v14"/></svg><svg viewBox="0 0 24 24" class="i-play"><path d="M8 5l11 7-11 7z"/></svg><span class="pl">Pause show</span></button>
+        <label class="look"><select id="dockLook" aria-label="Look"></select></label>
+      </div>
+    </div>
+
+    <div id="selbar" class="panel" hidden>
+      <div class="sb-name"><b id="sbName"></b><span id="sbHint">Drag to move · pull the arrow for height</span></div>
+      <div class="sb-btns">
+        <button class="ib" id="sbRot" title="Rotate 90° (R)"><svg viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4h-4"/></svg><span>Rotate</span></button>
+        <button class="ib" id="sbFill" title="Hang lights on this truss" hidden><svg viewBox="0 0 24 24"><path d="M3 5h18M6 5v3M12 5v3M18 5v3"/><path d="M4.5 8h3l-1.5 3zM10.5 8h3L12 11zM16.5 8h3L18 11z"/></svg><span>Add lights</span></button>
+        <button class="ib" id="sbDup" title="Duplicate (D)"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span>Duplicate</span></button>
+        <button class="ib" id="sbFocus" title="Zoom to it (double-click)"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2M11 8v6M8 11h6"/></svg><span>Zoom</span></button>
+        <button class="ib danger" id="sbDel" title="Delete (Del)"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg><span>Delete</span></button>
+      </div>
+    </div>
+
+    <div id="tip" hidden></div>
+    <div id="navhelp"><span><kbd>Drag</kbd> orbit</span><span><kbd>Right-drag</kbd> pan</span><span><kbd>Scroll</kbd> zoom</span><span><kbd>Double-click</kbd> zoom to</span></div>
+
+    <div id="welcome" class="panel" hidden>
+      <h2>Build a stage in three moves</h2>
+      <ol>
+        <li><b>Add gear.</b> <span class="d">Drag anything from the Library onto the stage. A preview shows where it lands. Lights snap onto truss and hang upside down on their own.</span><span class="m">Open Library, tap a piece of gear, then tap the stage where it goes.</span></li>
+        <li><b>Move it.</b> Click something to select it, then drag it. Pull the arrow up or down to change height. Rotate, copy and delete from the bar that pops up.</li>
+        <li><b>Check the numbers.</b> Paperwork works out power, rigging loads, the DMX patch and the gear list as you build.</li>
+      </ol>
+      <p class="fast">Fastest way to light a truss: select it and hit <b>Add lights</b>.</p>
+      <div class="actions">
+        <button class="btn accent" id="wDemo">Look around the demo stage</button>
+        <button class="btn" id="wBlank">Start from a blank stage</button>
+      </div>
+    </div>
+
+    <div id="readout"><span id="rdCur">X —  Z —</span><span id="rdTot"></span></div>
+    <div id="viewtag"></div>
+    <div id="hint" hidden></div>
+    <div id="toast" role="status"></div>
+  </div>
+  <aside id="side" class="panel" aria-label="Details">
+    <nav class="tabs" id="tabs">
+      <button data-p="lib" class="mob">Library</button>
+      <button data-p="insp" class="on">Inspect</button>
+      <button data-p="scene">Scene</button>
+      <button data-p="paper">Paperwork</button>
+      <button data-p="show">Show</button>
+    </nav>
+    <div class="pane" id="pane-lib" hidden></div>
+    <div class="pane" id="pane-insp"></div>
+    <div class="pane" id="pane-scene" hidden></div>
+    <div class="pane doc" id="pane-paper" hidden></div>
+    <div class="pane" id="pane-show" hidden></div>
+  </aside>
+</div>
+
+<div id="modal" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="ioTitle">
+    <h2 id="ioTitle">Save &amp; load</h2>
+    <p>Your design autosaves in this browser. To move it to another device or hand it to someone, export the design file and open it on the other side.</p>
+    <textarea id="io" spellcheck="false" aria-label="Design file"></textarea>
+    <div class="actions">
+      <button class="btn accent" id="ioCopy">Copy design</button>
+      <button class="btn" id="ioDownload" hidden>Download .json</button>
+      <button class="btn" id="ioLoad">Load pasted design</button>
+      <label class="btn">Open file<input type="file" id="ioFile" accept=".json,application/json" hidden></label>
+      <span class="sp"></span>
+      <button class="btn ghost" id="ioClose">Close</button>
+    </div>
+  </div>
+</div>
+<!--/APP-->
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
