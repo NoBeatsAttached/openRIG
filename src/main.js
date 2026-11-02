@@ -2,9 +2,9 @@
 import * as THREE from 'three';
 import { CAT } from './catalog.js';
 import { S, UI, on, dirty, save, exportDesign, loadSaved, pushUndo, popUndo, popRedo, dropUndo, fmtFt, fmtN, clone, reduceMotion, store, esc } from './state.js';
-import { canvas, host, composer, pcam, pctl, tctl, fctl, cam, ctl, tc, frameAll, setCamera, resize, applyEnv, viewTweaks, buildCrowd, bounceCrowd, focusBox, stepFocus, cancelFocus } from './engine.js';
+import { canvas, host, composer, pcam, pctl, tctl, fctl, cam, ctl, tc, frameAll, setCamera, resize, applyEnv, viewTweaks, buildCrowd, bounceCrowd, focusBox, stepFocus, cancelFocus, Q, setQuality, adapt } from './engine.js';
 import { objs, rebuildAll, select, sel, applyTool, applySnap, setRay, pick, groundPoint, placeAt, duplicate, removeItem, attachedTo,
-  updateGhost, hideGhost, endPlacing, rotatePlacing, rotateSel, beginDrag, dragMove, endDrag, dragging, trussName } from './objects.js';
+  updateGhost, hideGhost, endPlacing, rotatePlacing, rotateSel, beginDrag, dragMove, endDrag, dragging, trussName, updateSelHelper } from './objects.js';
 import { animate, drawWall, T } from './show.js';
 import { TEMPLATES } from './templates.js';
 import { totals } from './paperwork.js';
@@ -287,6 +287,10 @@ on('moved', syncPos);
 
 /* ---------- boot ---------- */
 applyTool(); applySnap(); renderLibrary(pickFromLibrary); placeLibrary();
+const qSaved = store.get('openrig.quality');
+setQuality(['auto', 'low', 'medium', 'high'].includes(qSaved) ? qSaved : 'auto');
+$('#quality').value = Q.level;
+$('#quality').onchange = e => { setQuality(e.target.value); applyEnv(); toast(e.target.value === 'auto' ? 'Quality: Auto. Resolution adjusts to keep it smooth.' : `Quality: ${e.target.value}`); };
 const saved = loadSaved();
 let booted = false;
 if (saved?.items?.length) { try { loadDesign(saved); booted = true; } catch { booted = false; } }
@@ -298,20 +302,32 @@ if (!booted) {
 applyEnv(); renderShow(syncLook); renderInspector(); syncLook(); setView('3d'); updateTotals();
 if (!store.get('openrig.welcomed')) showWelcome(true);
 
-let last = performance.now(), frame = 0;
+let last = performance.now(), frame = 0, fpsAcc = 0, fpsN = 0;
 function loop(now) {
   requestAnimationFrame(loop);
-  const dt = Math.min(.05, (now - last) / 1000); last = now; frame++;
+  if (document.hidden) { last = now; return; }
+  const raw = (now - last) / 1000, dt = Math.min(.05, raw); last = now; frame++;
+  adapt(raw, now);
+  fpsAcc += raw; fpsN++;
+  if (fpsAcc > .5) { $('#fps').textContent = Math.round(fpsN / fpsAcc) + ' fps' + (Q.level === 'auto' && Q.scale < 1 ? ` · ${Math.round(Q.scale * 100)}% res` : ''); fpsAcc = 0; fpsN = 0; }
   animate(dt);
-  if (frame % 2 === 0) for (const o of objs.values()) if (o.rig.wall) drawWall(o.rig.wall);
-  bounceCrowd(T);
+  if (frame % Q.wallEvery === 0) for (const o of objs.values()) if (o.rig.wall) drawWall(o.rig.wall);
+  if (frame % Q.crowdEvery === 0) bounceCrowd(T);
   stepFocus(dt);
   ctl().update();
-  placeSelbar();
+  placeSelbar(); updateSelHelper();
   composer.render();
 }
 requestAnimationFrame(loop);
 window.__openrig = { S, objs, setView, select, cam, ready: true };
 
 // library thumbnails render after first frame so the stage shows up fast
-setTimeout(() => renderThumbs((t, url) => { thumbs[t] = url; }).then(() => { renderLibrary(pickFromLibrary); renderInspector(); window.__openrig.thumbs = true; }).catch(() => { window.__openrig.thumbs = true; }), 300);
+const TKEY = 'openrig.thumbs.v3';
+let cached = null; try { cached = JSON.parse(store.get(TKEY) || 'null'); } catch { cached = null; }
+if (cached && Object.keys(CAT).every(k => cached[k])) {
+  Object.assign(thumbs, cached); renderLibrary(pickFromLibrary); renderInspector(); window.__openrig.thumbs = true;
+} else {
+  setTimeout(() => renderThumbs((t, url) => { thumbs[t] = url; }).then(() => {
+    store.set(TKEY, JSON.stringify(thumbs)); renderLibrary(pickFromLibrary); renderInspector(); window.__openrig.thumbs = true;
+  }).catch(() => { window.__openrig.thumbs = true; }), 600);
+}

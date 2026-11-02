@@ -77,7 +77,7 @@ export function rbox(w, h, d, r = .05) {
   keep(g); rbCache.set(k, g); return g;
 }
 const _up = new THREE.Vector3(0, 1, 0);
-function cylBetween(a, b, r, seg = 6) {
+function cylBetween(a, b, r, seg = 5) {
   const dir = new THREE.Vector3().subVectors(b, a), len = dir.length();
   const g = new THREE.CylinderGeometry(r, r, len, seg, 1, true);
   const q = new THREE.Quaternion().setFromUnitVectors(_up, dir.normalize());
@@ -92,7 +92,7 @@ export function trussGeometry(L, s) {
   const k = L + '_' + s; if (trussCache.has(k)) return trussCache.get(k);
   const R = .083, r = .038, y0 = R, y1 = s - R, h = s / 2 - R, parts = [];
   for (const [y, z] of [[y0, -h], [y0, h], [y1, -h], [y1, h]]) {
-    const c = new THREE.CylinderGeometry(R, R, L, 10, 1, false); c.rotateZ(Math.PI / 2); c.translate(0, y, z); parts.push(c);
+    const c = new THREE.CylinderGeometry(R, R, L, 8, 1, true); c.rotateZ(Math.PI / 2); c.translate(0, y, z); parts.push(c);
   }
   const n = Math.max(1, Math.round(L / (s * .95))), st = L / n;
   for (let i = 0; i < n; i++) {
@@ -113,6 +113,54 @@ export function trussGeometry(L, s) {
   keep(g); trussCache.set(k, g); return g;
 }
 
+/* ---------- draw-call reduction ----------
+   Every builder makes lots of small meshes. Before an object goes in the scene we
+   bake all static meshes that share a material into one mesh. Groups flagged
+   userData.dyn (moving-head yokes and heads) are baked separately so they can still move. */
+const _inv = new THREE.Matrix4(), _m4 = new THREE.Matrix4();
+export function optimize(root) {
+  root.updateMatrixWorld(true);
+  bake(root);
+  return root;
+}
+function bake(node) {
+  _inv.copy(node.matrixWorld).invert();
+  const inv = _inv.clone(), buckets = new Map();
+  (function walk(n) {
+    for (const c of [...n.children]) {
+      if (c.userData.dyn) { bake(c); continue; }
+      if (c.isMesh && !Array.isArray(c.material) && !c.material.isShaderMaterial && !c.userData.keep) {
+        const k = c.material.uuid;
+        if (!buckets.has(k)) buckets.set(k, { mat: c.material, list: [] });
+        buckets.get(k).list.push(c);
+      }
+      walk(c);
+    }
+  })(node);
+  for (const { mat, list } of buckets.values()) {
+    if (list.length < 2) continue;
+    const needUV = !!mat.map;
+    const geos = [];
+    for (const m of list) {
+      let g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+      for (const a of Object.keys(g.attributes)) if (a !== 'position' && a !== 'normal' && !(needUV && a === 'uv')) g.deleteAttribute(a);
+      if (!g.attributes.normal) g.computeVertexNormals();
+      if (needUV && !g.attributes.uv) { geos.length = 0; break; }
+      g.morphAttributes = {}; g.clearGroups();
+      g.applyMatrix4(_m4.multiplyMatrices(inv, m.matrixWorld));
+      geos.push(g);
+    }
+    if (geos.length !== list.length) continue;
+    const merged = mergeGeometries(geos, false);
+    if (!merged) continue;
+    geos.forEach(g => g.dispose());
+    merged.computeBoundingSphere();
+    list.forEach(m => m.parent.remove(m));
+    const mesh = new THREE.Mesh(merged, mat); mesh.renderOrder = list[0].renderOrder;
+    node.add(mesh);
+  }
+}
+
 /* ---------- fixtures ---------- */
 const lathe = (pts, seg = 24) => keep(new THREE.LatheGeometry(pts.map(p => new THREE.Vector2(p[0], p[1])), seg));
 const G = {
@@ -124,7 +172,7 @@ const G = {
 };
 
 // beam cone: tip at origin, opening toward +Y, base radius 1 at y=1
-export const CONE = keep((() => { const g = new THREE.ConeGeometry(1, 1, 40, 1, true); g.rotateX(Math.PI); g.translate(0, .5, 0); return g; })());
+export const CONE = keep((() => { const g = new THREE.ConeGeometry(1, 1, 28, 1, true); g.rotateX(Math.PI); g.translate(0, .5, 0); return g; })());
 
 const BEAM_VS = `
 varying float vY; varying vec3 vN; varying vec3 vV; varying vec3 vW;
@@ -136,58 +184,71 @@ void main(){
   gl_Position = projectionMatrix * mv;
 }`;
 const BEAM_FS = `
-uniform vec3 uColor; uniform float uInt; uniform float uTime;
+uniform vec3 uColor; uniform float uInt; uniform float uTime; uniform sampler2D uNoise;
 varying float vY; varying vec3 vN; varying vec3 vV; varying vec3 vW;
-float h3(vec3 p){ p = fract(p*.3183099+.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
-float n3(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
-  return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x),mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),
-             mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z); }
 void main(){
   float edge = abs(dot(normalize(vN), normalize(vV)));
-  edge = pow(edge, 1.6);
-  float fall = pow(clamp(1.0 - vY, 0.0, 1.0), 1.15);
-  float hz = n3(vW*0.09 + vec3(0.0, uTime*0.22, uTime*0.08))*0.65 + n3(vW*0.31 - vec3(uTime*0.18,0.0,0.0))*0.35;
-  float a = edge * fall * (0.45 + 0.85*hz) * uInt;
-  gl_FragColor = vec4(uColor * a, 1.0);
+  edge *= edge;
+  float fall = 1.0 - vY; fall *= fall;
+  float hz = texture2D(uNoise, vW.xy*0.012 + vec2(uTime*0.010, uTime*0.016)).r * 0.6
+           + texture2D(uNoise, vW.zy*0.031 - vec2(uTime*0.02, 0.0)).r * 0.4;
+  gl_FragColor = vec4(uColor * (edge * fall * (0.4 + 0.9*hz) * uInt), 1.0);
 }`;
+// small tiling noise texture for haze in the beams (generated once)
+const NOISE = (() => {
+  const N = 128, c = document.createElement('canvas'); c.width = c.height = N; const x = c.getContext('2d');
+  const base = new Float32Array(16 * 16).map(() => Math.random()), img = x.createImageData(N, N);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    let v = 0, amp = .6;
+    for (let o = 0, f = 16; o < 3; o++, f /= 2, amp *= .5) {
+      const gx = i / N * (16 / f), gy = j / N * (16 / f), x0 = Math.floor(gx), y0 = Math.floor(gy), tx = gx - x0, ty = gy - y0;
+      const k = (a, b) => base[((b % (16 / f) + 16 / f) % (16 / f)) * 16 + ((a % (16 / f) + 16 / f) % (16 / f))];
+      const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+      v += amp * ((k(x0, y0) * (1 - sx) + k(x0 + 1, y0) * sx) * (1 - sy) + (k(x0, y0 + 1) * (1 - sx) + k(x0 + 1, y0 + 1) * sx) * sy);
+    }
+    const p = (j * N + i) * 4; img.data[p] = img.data[p + 1] = img.data[p + 2] = Math.min(255, v * 255 / 1.05); img.data[p + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+})();
+export const BEAM_SIDE = { value: THREE.FrontSide };
 export function beamMaterial() {
   const m = new THREE.ShaderMaterial({
     vertexShader: BEAM_VS, fragmentShader: BEAM_FS,
-    uniforms: { uColor: { value: new THREE.Color(1, 1, 1) }, uInt: { value: 1 }, uTime: { value: 0 } },
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    uniforms: { uColor: { value: new THREE.Color(1, 1, 1) }, uInt: { value: 1 }, uTime: { value: 0 }, uNoise: { value: NOISE } },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: BEAM_SIDE.value,
   });
   m.userData.own = 1; return m;
 }
 
 export function buildFixture(it, def) {
   const p = it.props, g = new THREE.Group(), inner = new THREE.Group(); g.add(inner);
-  if (p.hung) { inner.rotation.z = Math.PI; inner.add(mk(rbox(.3, .34, .5, .04), MAT.steel, 0, -.17, 0)); }
+  if (p.hung) { inner.rotation.z = Math.PI; inner.add(mk(rbox(.3, .34, .5, .04), MAT.body, 0, -.17, 0)); }
   const lensMat = ownBasic(0x111111);
   let yoke = null, head = null, lensY = 0; const sc = def.sc || 1, lr = (def.lensR || .3) * sc;
   if (def.model === 'mover') {
     inner.add(mk(rbox(1.15 * sc, .5 * sc, .95 * sc, .07), MAT.body, 0, .25 * sc, 0));
-    inner.add(mk(BOX(.28 * sc, .1 * sc, .01), MAT.screen, .2 * sc, .3 * sc, .476 * sc));
-    yoke = new THREE.Group(); yoke.position.y = .5 * sc; inner.add(yoke);
+    yoke = new THREE.Group(); yoke.userData.dyn = true; yoke.position.y = .5 * sc; inner.add(yoke);
     yoke.add(mk(rbox(.15 * sc, .2 * sc, .4 * sc, .05), MAT.body, 0, .1 * sc, 0));
     yoke.add(mk(rbox(1.3 * sc, .14 * sc, .44 * sc, .06), MAT.body, 0, .22 * sc, 0));
     for (const x of [-.58, .58]) yoke.add(mk(rbox(.16 * sc, 1.08 * sc, .44 * sc, .06), MAT.body, x * sc, .74 * sc, 0));
-    head = new THREE.Group(); head.position.y = 1.05 * sc; yoke.add(head);
+    head = new THREE.Group(); head.userData.dyn = true; head.position.y = 1.05 * sc; yoke.add(head);
     const hm = mk(G.moverHead, MAT.body); hm.scale.setScalar(sc); head.add(hm);
     lensY = .5 * sc;
-    const ring = mk(G.ring, MAT.matte, 0, lensY + .006, 0); ring.scale.setScalar(.31 * sc); head.add(ring);
+    const ring = mk(G.ring, MAT.body, 0, lensY + .006, 0); ring.scale.setScalar(.31 * sc); head.add(ring);
   } else if (def.model === 'par') {
     inner.add(mk(BOX(.95, .07, .34), MAT.steel, 0, .035, 0));
     for (const x of [-.46, .46]) inner.add(mk(BOX(.06, .55, .22), MAT.steel, x, .32, 0));
-    head = new THREE.Group(); head.position.y = .5; inner.add(head);
+    head = new THREE.Group(); head.userData.dyn = true; head.position.y = .5; inner.add(head);
     head.add(mk(G.parCan, MAT.body)); lensY = .3;
   } else if (def.model === 'strobe') {
-    head = new THREE.Group(); inner.add(head);
+    head = new THREE.Group(); head.userData.dyn = true; inner.add(head);
     head.add(mk(rbox(2.3, .36, .5, .05), MAT.body, 0, .18, 0)); lensY = .365;
     lensMat.map = TEX.strobe;
     head.add(mk(BOX(2.1, .01, .34), lensMat, 0, lensY, 0));
   } else if (def.model === 'blinder') {
     inner.add(mk(BOX(.08, .5, .08), MAT.steel, 0, .25, 0));
-    head = new THREE.Group(); head.position.y = .75; inner.add(head);
+    head = new THREE.Group(); head.userData.dyn = true; head.position.y = .75; inner.add(head);
     head.add(mk(rbox(1.6, .32, .85, .05), MAT.body, 0, -.12, 0));
     for (const x of [-.4, .4]) { head.add(mk(G.blinderCup, MAT.steel, x, .06, 0)); const l = mk(G.lens, lensMat, x, .25, 0); l.scale.setScalar(.31); head.add(l); }
     lensY = .26;
@@ -201,14 +262,14 @@ export function buildFixture(it, def) {
 /* ---------- staging ---------- */
 export function buildDeck(it) {
   const p = it.props, g = new THREE.Group(), t = .28, lh = p.h - t;
-  const top = mk(BOX(p.w, t, p.d), [MAT.deckEdge, MAT.deckEdge, MAT.deck, MAT.deckEdge, MAT.deckEdge, MAT.deckEdge], 0, p.h - t / 2, 0);
-  g.add(top);
+  g.add(mk(BOX(p.w, t, p.d), MAT.deck, 0, p.h - t / 2, 0));
   if (lh > .05) {
-    const lg = new THREE.CylinderGeometry(.1, .1, lh, 8);
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) g.add(mk(lg, MAT.steel, sx * (p.w / 2 - .35), lh / 2, sz * (p.d / 2 - .35)));
     if (p.skirt) {
       g.add(mk(BOX(p.w, lh, .02), MAT.skirt, 0, lh / 2, p.d / 2 - .01)); g.add(mk(BOX(p.w, lh, .02), MAT.skirt, 0, lh / 2, -p.d / 2 + .01));
       g.add(mk(BOX(.02, lh, p.d), MAT.skirt, p.w / 2 - .01, lh / 2, 0)); g.add(mk(BOX(.02, lh, p.d), MAT.skirt, -p.w / 2 + .01, lh / 2, 0));
+    } else {
+      const lg = new THREE.CylinderGeometry(.1, .1, lh, 6);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) g.add(mk(lg, MAT.steel, sx * (p.w / 2 - .35), lh / 2, sz * (p.d / 2 - .35)));
     }
   }
   return { g, rig: {} };
@@ -244,11 +305,11 @@ export function buildDJ() {
 /* ---------- people ---------- */
 function personGeo(armsUp) {
   const parts = [];
-  for (const x of [-.24, .24]) { const l = new THREE.CylinderGeometry(.2, .17, 2.8, 7); l.translate(x, 1.4, 0); parts.push(l); }
-  const t = new THREE.CapsuleGeometry(.47, 1.2, 3, 8); t.scale(1, 1, .62); t.translate(0, 3.75, 0); parts.push(t);
-  const h = new THREE.SphereGeometry(.38, 10, 8); h.translate(0, 5.25, 0); parts.push(h);
+  for (const x of [-.24, .24]) { const l = new THREE.CylinderGeometry(.2, .17, 2.8, 5, 1, true); l.translate(x, 1.4, 0); parts.push(l); }
+  const t = new THREE.CapsuleGeometry(.47, 1.2, 2, 6); t.scale(1, 1, .62); t.translate(0, 3.75, 0); parts.push(t);
+  const h = new THREE.SphereGeometry(.38, 7, 5); h.translate(0, 5.25, 0); parts.push(h);
   for (const s of [-1, 1]) {
-    const a = new THREE.CylinderGeometry(.13, .11, 2.2, 6);
+    const a = new THREE.CylinderGeometry(.13, .11, 2.2, 4, 1, true);
     if (armsUp) { a.rotateZ(s * -.35); a.translate(s * .95, 5.35, 0); }
     else { a.rotateZ(s * .12); a.translate(s * .66, 3.45, 0); }
     parts.push(a);
@@ -273,7 +334,7 @@ export function buildBarricade(it) {
 }
 export function buildFOH() {
   const g = new THREE.Group();
-  g.add(mk(BOX(12, 1, 10), [MAT.deckEdge, MAT.deckEdge, MAT.deck, MAT.deckEdge, MAT.deckEdge, MAT.deckEdge], 0, .5, 0));
+  g.add(mk(BOX(12, 1, 10), MAT.deck, 0, .5, 0));
   g.add(mk(rbox(7, 2.9, 2.4, .08), MAT.body, 0, 2.45, -1));
   g.add(mk(BOX(6.4, .02, 1.7), MAT.screen, 0, 3.92, -1));
   const pg = new THREE.CylinderGeometry(.09, .09, 9.5, 8);
@@ -353,7 +414,7 @@ export function buildHazer() {
 export function buildWall(it) {
   const p = it.props, W = p.cols * PANEL, H = p.rows * PANEL, g = new THREE.Group();
   g.add(mk(BOX(W + .08, H + .08, .3), MAT.body, 0, H / 2, -.02));
-  const ppp = Math.max(6, Math.min(24, Math.floor(720 / p.cols))); // pixels per panel
+  const ppp = Math.max(4, Math.min(12, Math.floor(360 / p.cols))); // pixels per panel
   const cv = document.createElement('canvas'); cv.width = p.cols * ppp; cv.height = p.rows * ppp;
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.LinearFilter; tex.generateMipmaps = false;
   const m = new THREE.MeshBasicMaterial({ map: tex }); m.color.setScalar(1.7); m.userData.own = 1; m.userData.tex = tex;

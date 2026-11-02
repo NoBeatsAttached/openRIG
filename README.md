@@ -17,6 +17,7 @@ No install, no account, no license fee.
   - Automatic DMX patch, exportable as CSV
   - Gear list, plus print or save as PDF
 - **Files.** Designs autosave in the browser and export as `.openrig.json` to share.
+- **Runs smooth.** Static gear is merged into a handful of draw calls, and Auto quality lowers the render resolution when the frame rate drops. Pick Low, Medium or High yourself from the toolbar.
 
 > Rigging numbers are planning estimates, not engineering. Use the manufacturer's load tables and have a qualified rigger sign off before anything flies.
 

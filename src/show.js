@@ -1,15 +1,30 @@
 // Show engine: drives fixtures, beams, real spot lights and LED wall content every frame.
 import * as THREE from 'three';
 import { DEG } from './models.js';
-import { scene } from './engine.js';
+import { scene, Q, onQuality } from './engine.js';
 import { objs } from './objects.js';
 import { S, UI, reduceMotion } from './state.js';
 
-const POOL = 8, pool = [];
+// Real spot lights are expensive (every lit pixel pays for each one), so only High uses them.
+const POOL = 6, pool = [];
 for (let i = 0; i < POOL; i++) {
-  const l = new THREE.SpotLight(0xffffff, 0, 0, .3, .5, 2);
+  const l = new THREE.SpotLight(0xffffff, 0, 0, .3, .5, 2); l.visible = false;
   scene.add(l); scene.add(l.target); pool.push(l);
 }
+onQuality(q => pool.forEach(l => { l.visible = q.spots; }));
+
+// Cheap stand-in for every quality: a soft additive pool of light where each beam hits the floor.
+const poolTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, '#fff'); g.addColorStop(.45, 'rgba(255,255,255,.55)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c);
+})();
+const MAXP = 256;
+const pools = new THREE.InstancedMesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }), MAXP);
+pools.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAXP * 3), 3);
+pools.frustumCulled = false; pools.renderOrder = 2; pools.count = 0; scene.add(pools);
+const _pm = new THREE.Matrix4(), _pc = new THREE.Color();
 export let T = 0;
 const col = new THREE.Color(), wp = new THREE.Vector3(), wd = new THREE.Vector3();
 
@@ -17,7 +32,7 @@ export function animate(dt) {
   const sh = S.show; if (sh.playing) T += dt * sh.speed;
   const prog = sh.playing ? sh.program : 'static', haze = sh.haze / 100, master = sh.master / 100, night = sh.night;
   const flat = UI.view === 'plot' ? 0 : UI.view === 'front' ? .45 : 1;
-  const lit = []; let i = 0;
+  const lit = []; let i = 0, np = 0;
   for (const o of objs.values()) {
     const heads = o.rig.heads; if (!heads) continue;
     const p = o.item.props, d = o.def; let touched = false;
@@ -39,6 +54,7 @@ export function animate(dt) {
       if (h.head) h.head.rotation.x = tilt * DEG;
       h.lensMat.color.copy(col).multiplyScalar(.03 + dim * (d.strobe ? 9 : 6));
       if (h.beam) {
+        if (h.beamM.side !== Q.beamSide) { h.beamM.side = Q.beamSide; h.beamM.needsUpdate = true; }
         const on = dim > .01 && haze > 0; h.beam.visible = on;
         if (on) {
           if (!touched) { o.root.updateMatrixWorld(true); touched = true; }
@@ -50,11 +66,18 @@ export function animate(dt) {
           h.beamM.uniforms.uInt.value = dim * k2;
           h.beamM.uniforms.uTime.value = T;
           lit.push({ pos: wp.clone(), dir: wd.clone(), col: col.clone(), dim, beam: d.beam, len: L });
+          if (wd.y < -.02 && L < max && np < MAXP && flat) {
+            const rr = Math.max(.6, r * L / Math.max(.35, -wd.y));
+            _pm.makeScale(rr * (1 + Math.abs(wd.x) * .6), 1, rr * (1 + Math.abs(wd.z) * .6)).setPosition(wp.x + wd.x * L, .06, wp.z + wd.z * L);
+            pools.setMatrixAt(np, _pm); pools.setColorAt(np, _pc.copy(col).multiplyScalar(dim * (night ? .55 : .15) * (d.beam < 6 ? .5 : 1))); np++;
+          }
         }
       }
     }
   }
-  // feed a handful of real spot lights so beams actually light the deck and the crowd
+  pools.count = np; pools.instanceMatrix.needsUpdate = true; if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
+  if (!Q.spots) return;
+  // High: feed a handful of real spot lights so beams actually light the deck and the crowd
   const step = lit.length > POOL ? lit.length / POOL : 1;
   for (let j = 0; j < POOL; j++) {
     const l = pool[j], s = j < lit.length ? lit[Math.floor(j * step)] : null;

@@ -8,15 +8,16 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { MAT, PERSON, SHARED } from './models.js';
-import { S, UI } from './state.js';
+import { MAT, PERSON, SHARED, BEAM_SIDE } from './models.js';
+import { S, UI, store } from './state.js';
 
 export const canvas = document.getElementById('c');
 export const host = document.getElementById('stage');
-const mobileGPU = matchMedia('(max-width: 820px)').matches;
+const mobileGPU = matchMedia('(max-width: 820px)').matches || /Mobi|Android/i.test(navigator.userAgent);
 
-export const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, mobileGPU ? 1.5 : 2));
+// Post-processing renders into its own target, so canvas antialiasing would be wasted work.
+export const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false });
+renderer.setPixelRatio(1);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
@@ -78,16 +79,57 @@ scene.add(tc.getHelper());
 tc.addEventListener('dragging-changed', e => { ctl().enabled = !e.value; });
 
 /* post */
-export const composer = new EffectComposer(renderer);
+const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 2 });
+export const composer = new EffectComposer(renderer, rt);
 const renderPass = new RenderPass(scene, pcam); composer.addPass(renderPass);
 export const outline = new OutlinePass(new THREE.Vector2(256, 256), scene, pcam);
 outline.visibleEdgeColor.set(0xffb547); outline.hiddenEdgeColor.set(0x6b4a1c); outline.edgeStrength = 4; outline.edgeThickness = 1; outline.edgeGlow = 0;
+outline.downSampleRatio = 2; outline.enabled = false;
 composer.addPass(outline);
 export const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), .6, .45, .9);
+// bloom is soft by nature: run it at half resolution
+const bloomSetSize = bloom.setSize.bind(bloom); bloom.setSize = (w, h) => bloomSetSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 export function setCamera(c) { renderPass.camera = c; outline.renderCamera = c; tc.camera = c; }
+
+/* ---------- quality ----------
+   auto: medium settings, and the render resolution scales itself to hold the frame rate.
+   low / medium / high: fixed. */
+export const QUALITY = {
+  low: { dpr: .75, msaa: 0, bloom: false, spots: false, outline: false, beamSide: THREE.FrontSide, crowdEvery: 3, wallEvery: 6 },
+  medium: { dpr: 1.25, msaa: 2, bloom: true, spots: false, outline: false, beamSide: THREE.FrontSide, crowdEvery: 2, wallEvery: 4 },
+  high: { dpr: 2, msaa: 4, bloom: true, spots: true, outline: true, beamSide: THREE.DoubleSide, crowdEvery: 1, wallEvery: 2 },
+};
+export const Q = { level: 'auto', ...QUALITY.medium, scale: 1 };
+const listeners = [];
+export const onQuality = fn => listeners.push(fn);
+export function setQuality(level) {
+  Q.level = level; Object.assign(Q, QUALITY[level === 'auto' ? (mobileGPU ? 'low' : 'medium') : level]);
+  Q.scale = 1;
+  rt.samples = Q.msaa; composer.renderTarget1.samples = Q.msaa; composer.renderTarget2.samples = Q.msaa;
+  composer.renderTarget1.dispose(); composer.renderTarget2.dispose();
+  BEAM_SIDE.value = Q.beamSide;
+  store.set('openrig.quality', level);
+  applyDPR(); listeners.forEach(f => f(Q));
+  applyEnv();
+}
+function applyDPR() {
+  const d = Math.max(.5, Math.min(devicePixelRatio || 1, Q.dpr) * Q.scale);
+  renderer.setPixelRatio(d); composer.setPixelRatio(d); resize();
+}
+// Adaptive resolution: watch real frame times and step the render scale down/up.
+let acc = 0, frames = 0, lastAdj = 0;
+export function adapt(dt, now) {
+  if (Q.level !== 'auto' || document.hidden) return;
+  acc += dt; frames++;
+  if (acc < 1.2) return;
+  const ms = acc / frames * 1000; acc = 0; frames = 0;
+  if (now - lastAdj < 1500) return;
+  if (ms > 24 && Q.scale > .5) { Q.scale = Math.max(.5, +(Q.scale - .15).toFixed(2)); lastAdj = now; applyDPR(); }
+  else if (ms < 14 && Q.scale < 1) { Q.scale = Math.min(1, +(Q.scale + .1).toFixed(2)); lastAdj = now; applyDPR(); }
+}
 
 function fitOrtho(c, half) { const a = host.clientWidth / Math.max(1, host.clientHeight); c.left = -half * a; c.right = half * a; c.top = half; c.bottom = -half; c.updateProjectionMatrix(); }
 export function resize() {
@@ -108,7 +150,7 @@ export function applyEnv() {
   const cad = UI.view === 'plot' || UI.view === 'front';
   hemi.intensity = cad ? 1.5 : n ? .32 : 1.6; sun.intensity = cad ? 1.6 : n ? .08 : 2.4;
   if (cad) scene.fog = null;
-  bloom.enabled = !cad;
+  bloom.enabled = !cad && Q.bloom;
   scene.environmentIntensity = n ? .35 : 1;
   MAT.ground.color.set(n ? 0xffffff : 0x9aa38c);
   gridU.uOpacity.value = n ? .28 : .3;
@@ -135,7 +177,7 @@ export function buildCrowd() {
   if (!S.show.crowd) return;
   const n = Math.max(0, Math.min(5000, S.show.crowdN | 0)); if (!n) return;
   const nUp = Math.round(n * .22), nDown = n - nUp;
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, envMapIntensity: .25 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0, envMapIntensity: .7 });
   crowdDown = new THREE.InstancedMesh(PERSON.down, mat, nDown); crowdUp = new THREE.InstancedMesh(PERSON.up, mat, nUp);
   base = { down: new Float32Array(nDown * 4), up: new Float32Array(nUp * 4) };
   const c = new THREE.Color(), cloth = [[.6, .12, .05], [.0, .0, .06], [.62, .06, .1], [.08, .18, .07], [.58, .25, .07], [.0, .0, .03], [.75, .1, .12], [.95, .3, .08]];

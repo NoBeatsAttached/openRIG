@@ -252,6 +252,10 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
 .snap { display: inline-flex; align-items: center; gap: 2px; }
 .snap .sl { font-size: 11px; color: var(--dim); padding-left: 6px; }
 
+#fps { position: absolute; right: 376px; bottom: calc(var(--gap) + 4px); font: 10.5px var(--f-mono); color: var(--dim); pointer-events: none; z-index: 2; text-shadow: 0 1px 2px #000; }
+@media (max-width: 1180px) { #fps { right: 344px; } }
+@media (max-width: 820px) { #fps { right: 10px; bottom: auto; top: 10px; } }
+
 /* modal */
 #modal { position: fixed; inset: 0; background: rgba(4, 5, 8, .7); display: grid; place-items: center; z-index: 20; padding: 16px; }
 .sheet { background: var(--solid); border: 1px solid var(--line2); border-radius: 14px; padding: 20px; width: min(580px, 100%); max-height: 100%; overflow: auto; }

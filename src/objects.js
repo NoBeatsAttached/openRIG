@@ -1,9 +1,10 @@
 // Scene objects for each design item, selection, picking and placement.
 import * as THREE from 'three';
 import { CAT } from './catalog.js';
-import { DEG, SHARED, trussS } from './models.js';
-import { scene, tc, outline, groundPlane, cam } from './engine.js';
+import { DEG, SHARED, trussS, optimize } from './models.js';
+import { scene, tc, outline, groundPlane, cam, Q, onQuality } from './engine.js';
 import { S, UI, clone, r3, pushUndo, dirty, emit, fmtFt } from './state.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export const objs = new Map();
 let hitboxes = [];
@@ -15,6 +16,7 @@ export function newItem(type, x, y, z, rot = 0, props = {}) {
 export function makeObj(it) {
   const def = CAT[it.type]; if (!def) return;
   const { g, rig } = def.build(it, def);
+  optimize(g);
   const root = new THREE.Group(); root.add(g);
   const heads = (rig.heads || []).filter(h => h.beam);
   heads.forEach(h => h.head.remove(h.beam));
@@ -37,15 +39,109 @@ function disposeObj(o) {
     for (const m of mats) if (m.userData?.own) { m.userData.tex?.dispose(); m.dispose(); }
   });
 }
-const refreshHits = () => { hitboxes = [...objs.values()].map(o => o.hitbox); };
+const refreshHits = () => { hitboxes = [...objs.values()].map(o => o.hitbox); queueBatch(); };
+
+/* ---------- static batch ----------
+   Everything that isn't moving right now gets merged into one mesh per material
+   for the whole stage, so a festival rig draws in a few dozen calls instead of
+   hundreds. The selected object (and gear on its truss) stays live so it can move. */
+let batch = null, batchQueued = false, batchPending = false;
+export function queueBatch() {
+  if (batchQueued) return; batchQueued = true;
+  requestAnimationFrame(() => { batchQueued = false; rebuildBatch(); });
+}
+function staticMeshes(o, out) {
+  (function walk(n) {
+    for (const c of n.children) {
+      if (c.userData.dyn) continue;
+      if (c.isMesh && !Array.isArray(c.material) && !c.material.isShaderMaterial && !c.userData.keep) out.push(c);
+      walk(c);
+    }
+  })(o.body);
+  return out;
+}
+const _bm = new THREE.Matrix4();
+export function rebuildBatch() {
+  if (drag || tc.dragging) { batchPending = true; return; }
+  clearHighlight();
+  batchPending = false;
+  if (batch) { scene.remove(batch); batch.children.forEach(m => m.geometry.dispose()); batch = null; }
+  const live = new Set(), s = sel();
+  if (s) { live.add(s.item.id); attachedTo(s).forEach(k => live.add(k.item.id)); }
+  scene.updateMatrixWorld();
+  const buckets = new Map();
+  for (const o of objs.values()) {
+    const ms = staticMeshes(o, []);
+    if (live.has(o.item.id)) { ms.forEach(m => { m.visible = true; }); continue; }
+    for (const m of ms) {
+      const k = m.material.uuid;
+      if (!buckets.has(k)) buckets.set(k, { mat: m.material, list: [] });
+      buckets.get(k).list.push(m);
+    }
+  }
+  batch = new THREE.Group(); batch.name = 'static-batch';
+  for (const { mat, list } of buckets.values()) {
+    if (list.length < 2) { list.forEach(m => { m.visible = true; }); continue; }
+    const needUV = !!mat.map, geos = [];
+    for (const m of list) {
+      const src = m.geometry;
+      if (needUV && !src.attributes.uv) break;
+      const g = new THREE.BufferGeometry();
+      const nonIdx = src.index ? src.toNonIndexed() : src;
+      g.setAttribute('position', nonIdx.attributes.position.clone());
+      if (nonIdx.attributes.normal) g.setAttribute('normal', nonIdx.attributes.normal.clone());
+      if (needUV) g.setAttribute('uv', nonIdx.attributes.uv.clone());
+      if (nonIdx !== src) nonIdx.dispose();
+      if (!g.attributes.normal) g.computeVertexNormals();
+      g.applyMatrix4(_bm.copy(m.matrixWorld));
+      geos.push(g);
+    }
+    const merged = geos.length === list.length ? mergeGeometries(geos, false) : null;
+    geos.forEach(g => g.dispose());
+    if (!merged) { list.forEach(m => { m.visible = true; }); continue; }
+    merged.computeBoundingSphere();
+    list.forEach(m => { m.visible = false; });
+    batch.add(new THREE.Mesh(merged, mat));
+  }
+  scene.add(batch);
+  applyHighlight();
+}
+
+/* selection highlight: the selected object's meshes swap to an amber-tinted copy of
+   their material. Costs nothing per frame (an outline pass re-renders the whole scene). */
+const hiMats = new Map();
+function hiMat(m) {
+  if (!hiMats.has(m.uuid)) {
+    const h = m.clone();
+    if (h.emissive) { h.emissive = new THREE.Color(0xffb547); h.emissiveIntensity = .28; }
+    else if (h.color) h.color = h.color.clone().lerp(new THREE.Color(0xffb547), .5);
+    h.userData = { ...m.userData, own: 0, hi: 1 };
+    hiMats.set(m.uuid, h);
+  }
+  return hiMats.get(m.uuid);
+}
+let lit = [];
+function clearHighlight() { for (const [mesh, m] of lit) mesh.material = m; lit = []; }
+function applyHighlight() {
+  clearHighlight(); outline.enabled = false;
+  const o = sel(); if (!o) return;
+  (function walk(n) {
+    for (const c of n.children) {
+      if (c.isMesh && !Array.isArray(c.material) && !c.material.isShaderMaterial && !c.material.userData?.own) { lit.push([c, c.material]); c.material = hiMat(c.material); }
+      walk(c);
+    }
+  })(o.body);
+}
+export function updateSelHelper() {}
 
 export function rebuildOne(id) {
   const o = objs.get(id); if (!o) return;
+  if (UI.selId === id) clearHighlight();
   disposeObj(o); objs.delete(id); makeObj(o.item); refreshHits();
-  if (UI.selId === id) attachSel();
+  if (UI.selId === id) { attachSel(); applyHighlight(); }
 }
 export function rebuildAll() {
-  tc.detach();
+  tc.detach(); clearHighlight();
   for (const o of objs.values()) disposeObj(o);
   objs.clear(); S.items.forEach(makeObj); refreshHits();
   if (!objs.has(UI.selId)) UI.selId = null;
@@ -62,15 +158,21 @@ export function removeItem(id) {
 export const sel = () => objs.get(UI.selId);
 export function attachSel() {
   const o = sel();
-  if (o) { tc.attach(o.root); const list = []; o.body.traverse(n => { if (n.isMesh && !n.material.isShaderMaterial) list.push(n); }); outline.selectedObjects = list; }
-  else { tc.detach(); outline.selectedObjects = []; }
+  if (o) tc.attach(o.root); else tc.detach();
 }
-export function select(id) { UI.selId = id; attachSel(); emit('select', id); }
+export function select(id) {
+  const changed = UI.selId !== id;
+  clearHighlight();
+  UI.selId = id; attachSel();
+  if (changed) rebuildBatch();
+  applyHighlight(); emit('select', id);
+}
 // The gizmo only does height now. Moving is drag-on-floor, rotating is a button.
 export function applyTool() { tc.setMode('translate'); tc.showX = false; tc.showZ = false; tc.showY = true; }
 export function applySnap() { tc.setTranslationSnap(UI.snap || null); }
 let gizKids = [];
 tc.addEventListener('mouseDown', () => { pushUndo(); const o = sel(); gizKids = o ? kidOffsets(o) : []; });
+tc.addEventListener('mouseUp', () => { if (batchPending) queueBatch(); });
 tc.addEventListener('objectChange', () => {
   const o = sel(); if (!o) return; const r = o.root;
   o.item.y = r3(Math.max(0, r.position.y)); r.position.y = o.item.y;
@@ -248,7 +350,7 @@ export function dragMove() {
   emit('moved');
   return r;
 }
-export function endDrag() { const m = drag?.moved; drag = null; if (m) dirty(); return m; }
+export function endDrag() { const m = drag?.moved; drag = null; if (m) dirty(); if (batchPending) queueBatch(); return m; }
 
 /* fill a truss with evenly spaced fixtures */
 export function fixturesOn(trussObj) {

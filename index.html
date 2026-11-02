@@ -56,6 +56,9 @@
         <button class="ib play" id="playBtn" title="Play / pause the light show (Space)"><svg viewBox="0 0 24 24" class="i-pause"><path d="M9 5v14M15 5v14"/></svg><svg viewBox="0 0 24 24" class="i-play"><path d="M8 5l11 7-11 7z"/></svg><span class="pl">Pause show</span></button>
         <label class="look"><select id="dockLook" aria-label="Look"></select></label>
       </div>
+      <div class="grp">
+        <label class="look" title="Graphics quality. Auto lowers the resolution when things get slow."><select id="quality" aria-label="Graphics quality"><option value="auto">Auto quality</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+      </div>
     </div>
 
     <div id="selbar" class="panel" hidden>
@@ -87,6 +90,7 @@
     </div>
 
     <div id="readout"><span id="rdCur">X —  Z —</span><span id="rdTot"></span></div>
+    <div id="fps" aria-hidden="true"></div>
     <div id="viewtag"></div>
     <div id="hint" hidden></div>
     <div id="toast" role="status"></div>
